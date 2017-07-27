@@ -1,27 +1,29 @@
 #!/bin/bash
 # Version 2.0
-# This is a report script.
-# It parses the system's configuration and
-# produce a report about the real-time config
-# It won't modify the system's config
+# This is a configuration script.
+# It parses the system's configuration and adapt it to the real-time config
+# Modify only the grub configuration file (no other file are impacted)
 
 TOLERATED_INTERRUPTIONS_NUMBER=100
 
-GRUB_CONF_FILE="/etc/default/grub"
-CPU_INFO_FILE="/proc/cpuinfo"
-INTERRUPTION_FILE="/proc/interrupts"
-CURRENT_CLOCKSOURCE="/sys/devices/system/clocksource/clocksource0/current_clocksource"
-AVAILABLE_CLOCKSOURCE="/sys/devices/system/clocksource/clocksource0/available_clocksource"
-
-# Variable set at 0 and will be set to 1 , if correctly configured
+GRUB_CONF_FILE="/etc/default/grub" # (read and write)
+CPU_INFO_FILE="/proc/cpuinfo" # (read only)
+INTERRUPTION_FILE="/proc/interrupts"  # (read only)
+CURRENT_CLOCKSOURCE="/sys/devices/system/clocksource/clocksource0/current_clocksource"  # (read only)
+AVAILABLE_CLOCKSOURCE="/sys/devices/system/clocksource/clocksource0/available_clocksource"  # (read only)
+ 
+KERNEL_REALTIME=0 # Will be set to -1 if not RT
+# Variable set at 0 and will be 
+# set to 1 -> something has been add to the conf
+# set to 2 -> something has been replaced in the conf
 HYPERTHREADING=0
-KERNEL_REALTIME=0
 KERNEL_NOHZ=0
 KERNEL_INTELIDLEMAXCSTATE=0
 KERNEL_PROCESSORMAXCSTATE=0
-KERNEL_IDLEPOOL=0
+KERNEL_IDLEPOLL=0
 KERNEL_LAPICTIMER=0
 KERNEL_ACPINOAPIC=0
+KERNEL_ACPINOIRQ=0
 IRQ=0
 ISOLCPU=0
 TSC_CLOCK=0
@@ -33,7 +35,6 @@ nbCore=0
 
 main(){
 	START=$(date +%s)
-	clear # Clear the screen
 
 	firstCheck
 	preparation
@@ -44,6 +45,7 @@ main(){
 	checkIRQ
 	checkKernel
 
+	clear # Clear the screen
 	showResults
 	END=$(date +%s)
 	ELLAPSED_TIME=$[$END-$START]
@@ -52,24 +54,17 @@ main(){
 
 ########## FUNCTIONS ##########
 firstCheck(){ # Checks that user has the root rights and that the files used in script exist.	
-	if [ "$(id -u)" != "0" ]; then
-	   echo "[ERROR] This script must be run as root" 1>&2
-	   exit 1
+	if [ "$(id -u)" != "0" ]; then	   
+	   exitOnError "This script must be run as root" 
 	fi
 	if [ ! -f $GRUB_CONF_FILE ]; then
-	   echo "[ERROR] The file $GRUB_CONF_FILE does not exist"
-	   echo "[ERROR] Please check your 'grub configuration file' location ($GRUB_CONF_FILE)"
-	   exit 1
+	   exitOnError "The file $GRUB_CONF_FILE does not exist\nPlease check your 'grub configuration file' location ($GRUB_CONF_FILE)"
 	fi
 	if [ ! -f $CPU_INFO_FILE ]; then
-	   echo "[ERROR] The file $CPU_INFO_FILE does not exist"
-	   echo "[ERROR] Please check your 'cpuinfo' file location ($CPU_INFO_FILE)"
-	   exit 1
+	   exitOnError "The file $CPU_INFO_FILE does not exist\nPlease check your 'cpuinfo' file location ($CPU_INFO_FILE)"
 	fi
 	if [ ! -f $INTERRUPTION_FILE ]; then
-	   echo "[ERROR] The file $INTERRUPTION_FILE does not exist"
-	   echo "[ERROR] Please check your 'interrupts' file location ($INTERRUPTION_FILE)"
-	   exit 1
+	   exitOnError "The file $INTERRUPTION_FILE does not exist\nPlease check your 'interrupts' file location ($INTERRUPTION_FILE)"
 	fi
 }
 preparation(){ # Set both variable : $nbCore and $NONISOLCOREETABLE
@@ -204,42 +199,107 @@ checkHyperThreading(){ # Checks that Hyperthreading is off (Only one thread per 
 	fi
 }
 checkKernel(){ # Checks for the Kernel configuration...
-	if [[ $(uname -a | grep -i 'rt-') ]]; then # unsensible to case
-    	KERNEL_REALTIME=1
+	if [[ ! $(uname -a | grep -i 'rt-') ]]; then # unsensible to case
+    	KERNEL_REALTIME=-1
 	fi
-	if [[ $(grep -v '#' $GRUB_CONF_FILE | grep 'nohz' | sed "s/ //g" | grep 'nohz=off') ]]; then # invert grep (match if the occurence is NOT found)
+	if [[ ! $(grep -v '#' $GRUB_CONF_FILE | grep 'lapic_timer_c2_ok') ]]; then
+		# Appending 'lapic_timer_c2_ok'	
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ lapic_timer_c2_ok/')
+		KERNEL_LAPICTIMER=1
+	fi
+	if [[ ! $(grep -v '#' $GRUB_CONF_FILE | grep 'noapic') ]]; then
+		# Appending 'noapic'	
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ noapic/')
+		KERNEL_ACPINOAPIC=1
+	fi
+
+	if [[ $(grep -v '#' $GRUB_CONF_FILE | grep 'nohz') ]]; then # invert grep (match if the occurence is NOT found)
+		if [[ $(grep -v '#' $GRUB_CONF_FILE | grep 'nohz' | sed "s/ //g" | grep 'nohz=on') ]]; then # invert grep (match if the occurence is NOT found)
+			# Replacing 'nohz=on' by 'nohz=off'
+			$(sed -i $GRUB_CONF_FILE -e "s/^\([ ]*GRUB_CMDLINE_LINUX_DEFAULT.*nohz=\)on/\1off/" )
+			KERNEL_NOHZ=2
+		fi
+	else
+		# Appending 'nohz=off'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ nohz=off/')
 		KERNEL_NOHZ=1
 	fi
-	if [[ $(grep -v '#' $GRUB_CONF_FILE  | grep -o 'intel_idle\.max_cstate=[0-9]*\s' | cut -d '=' -f2 | cut -d ' ' -f1) -eq 0 ]]; then # -o select only the parts of the string which match
+
+	if [[ $(grep -v '#' $GRUB_CONF_FILE |  grep 'idle') ]]; then
+		if [[ $(grep -v '#' $GRUB_CONF_FILE | sed "s/ //g" | grep "idle= *[a-zA-Z0-9][a-zA-Z0-9]*") ]]; then # invert grep (match if the occurence is NOT found)
+			# Replacing 'idle=something' by 'idle=poll'
+			$(sed -i $GRUB_CONF_FILE -e "s/^\([ ]*GRUB_CMDLINE_LINUX_DEFAULT.*idle=\) *[a-zA-Z0-9][a-zA-Z0-9]*/\1poll/")
+			KERNEL_IDLEPOLL=2
+		fi
+	else
+		# Appending 'idle=poll'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ idle=poll/')
+		KERNEL_IDLEPOLL=1
+	fi
+
+	if [[ $(grep -v '#' $GRUB_CONF_FILE |  grep 'acpi') ]]; then
+		if [[ $(grep -v '#' $GRUB_CONF_FILE | sed "s/ //g" | grep "acpi= *[a-zA-Z0-9][a-zA-Z0-9]*") ]]; then # invert grep (match if the occurence is NOT found)
+			# Replacing 'acpi=something' by 'acpi=noirq'
+			$(sed -i $GRUB_CONF_FILE -e "s/^\([ ]*GRUB_CMDLINE_LINUX_DEFAULT.*acpi=\) *[a-zA-Z0-9][a-zA-Z0-9]*/\1noirq/")
+			KERNEL_ACPINOIRQ=2
+		fi
+	else
+		# Appending 'acpi=noirq'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ acpi=noirq/')
+		KERNEL_ACPINOIRQ=1
+	fi
+
+
+	if [[ $(grep -v '#' $GRUB_CONF_FILE |  grep 'intel_idle\.max_cstate') ]]; then
+		if [[ $(grep -v '#' $GRUB_CONF_FILE  | grep -o 'intel_idle\.max_cstate=[0-9]*\s' | cut -d '=' -f2 | cut -d ' ' -f1) -ne 0 ]]; then # -o select only the parts of the string which match
+			# Replacing old value by 0
+			$(sed -i $GRUB_CONF_FILE -e "s/^\([ ]*GRUB_CMDLINE_LINUX_DEFAULT.*intel_idle\.max_cstate=\) *[a-zA-Z0-9][a-zA-Z0-9]*/\10/")
+			KERNEL_INTELIDLEMAXCSTATE=2
+		fi
+	else
+		# Appending 'intel_idle\.max_cstate=0'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ intel_idle\.max_cstate=0/')
 		KERNEL_INTELIDLEMAXCSTATE=1
 	fi
 
-	if [[ $(grep -v '#'  $GRUB_CONF_FILE | grep -o 'processor.max_cstate=[0-9]*\s' | cut -d '=' -f2 | cut -d ' ' -f1) -eq 0 ]]; then
+	if [[ $(grep -v '#' $GRUB_CONF_FILE |  grep 'processor\.max_cstate') ]]; then
+		if [[ $(grep -v '#' $GRUB_CONF_FILE  | grep -o 'processor\.max_cstate=[0-9]*\s' | cut -d '=' -f2 | cut -d ' ' -f1) -ne 0 ]]; then # -o select only the parts of the string which match
+			# Replacing old value by 0
+			$(sed -i $GRUB_CONF_FILE -e "s/^\([ ]*GRUB_CMDLINE_LINUX_DEFAULT.*processor\.max_cstate=\) *[a-zA-Z0-9][a-zA-Z0-9]*/\10/")
+			KERNEL_PROCESSORMAXCSTATE=2
+		fi
+	else
+		# Appending 'processor.max_cstate=0'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ processor\.max_cstate=0/')
 		KERNEL_PROCESSORMAXCSTATE=1
 	fi
-	if [[ $(grep -v '#' $GRUB_CONF_FILE |  grep 'idle' | sed "s/ //g" | grep 'idle=poll' ) ]]; then
-		KERNEL_IDLEPOOL=1
-	fi
-	if [[ $(grep -v '#' $GRUB_CONF_FILE | grep 'lapic_timer_c2_ok') ]]; then
-		KERNEL_LAPICTIMER=1
-	fi
-	if [[ $(grep -v '#' $GRUB_CONF_FILE | grep 'noapic') ]]; then
-		KERNEL_ACPINOAPIC=1
-	fi
+}
+# # Return the correct line in grub conf file to be edited
+# spotCorrectLineInGrubConf(){
+# 	if [[ ! $(grep -n -v '#' $GRUB_CONF_FILE | grep 'GRUB_CMDLINE_LINUX_DEFAULT') | wc -l) -eq 1 ]]; then
+# 		exitOnError "$GRUB_CONF_FILE seems to be corrupted"
+# 	else
+# 		return $(grep -n -v '#' $GRUB_CONF_FILE | grep 'GRUB_CMDLINE_LINUX_DEFAULT' | cut -d':' -f1) 
+# 	fi
+# }
+exitOnError(){
+	   printf "[ERROR] $1" 1>&2
+	   exit 1
 }
 checkClock(){  # Checks that used clock is TSC
-	if [[ $(cat $CURRENT_CLOCKSOURCE)=tsc ]]; then
-		TSC_CLOCK=1
-	else
-		if ![[ $( cat $AVAILABLE_CLOCKSOURCE | grep 'tsc') ]]; then
-			echo "Cannot find TSC clock on system"
+	if [[ ! $(cat $CURRENT_CLOCKSOURCE)=tsc ]]; then
+		if [[ ! $( cat $AVAILABLE_CLOCKSOURCE | grep 'tsc') ]]; then
+			TSC_CLOCK=-1
+		else
+			echo "tsc" > $CURRENT_CLOCKSOURCE
+			TSC_CLOCK=1
 		fi
 	fi
-
-	if [[ $( cat $GRUB_CONF_FILE | grep 'tsc=reliable' | grep -v '#') ]]; then
+	if [[ ! $(grep -v '#' $GRUB_CONF_FILE | grep 'tsc' | sed "s/ //g" | grep 'tsc=reliable') ]]; then
+		# Appending 'tsc=reliable'
+		$(sed -i $GRUB_CONF_FILE -e '/^[ ]*GRUB_CMDLINE_LINUX_DEFAULT/s/$/ tsc=reliable/')
 		TSC_RELIABLE=1
 	fi
-}
 showResults(){ # Display the results in table form
 	echo "-----------------------------------------------"
 	echo "|           Configuration Checking            |"
@@ -248,68 +308,85 @@ showResults(){ # Display the results in table form
 	echo "|---------------------------------------------|"
 	echo "|            Config           |     Status    |"
 	echo "|----------------------------------------------"
-	if [[ $KERNEL_REALTIME -eq 0 ]]; then
+	if [[ $KERNEL_REALTIME -eq -1 ]]; then
 		echo "|       KERNEL_REALTIME       |    [ERROR]    |"
 	else
 		echo "|       KERNEL_REALTIME       |     [OK]      |"
 	fi
-	if [[ $HYPERTHREADING -eq 0 ]]; then
-		echo "|        HYPERTHREADING       |    [ERROR]    |"
+	# if [[ $HYPERTHREADING -eq 0 ]]; then
+	# 	echo "|        HYPERTHREADING       |    [ERROR]    |"
+	# else
+	# 	echo "|        HYPERTHREADING       |     [OK]      |"
+	# fi
+	if [[ $KERNEL_NOHZ -eq 1 ]]; then
+		echo "|         KERNEL_NOHZ         |    [ADDED]    |"
+	elif [[ $KERNEL_NOHZ -eq 2 ]]; then
+		echo "|         KERNEL_NOHZ         |   [REPLACED]  |"
 	else
-		echo "|        HYPERTHREADING       |     [OK]      |"
-	fi
-	if [[ $KERNEL_NOHZ -eq 0 ]]; then
-		echo "|         KERNEL_NOHZ         |    [ERROR]    |"
-	else 
 		echo "|         KERNEL_NOHZ         |     [OK]      |"
 	fi
-	if [[ $KERNEL_INTELIDLEMAXCSTATE -eq 0 ]]; then
-		echo "|  KERNEL_INTELIDLEMAXCSTATE  |    [ERROR]    |"
+	if [[ $KERNEL_IDLEPOLL -eq 1 ]]; then
+		echo "|       KERNEL_IDLEPOLL       |    [ADDED]    |"
+	elif [[ $KERNEL_IDLEPOLL -eq 2 ]]; then
+		echo "|       KERNEL_IDLEPOLL       |   [REPLACED]  |"
+	else
+		echo "|       KERNEL_IDLEPOLL       |     [OK]      |"
+	fi
+	if [[ $KERNEL_LAPICTIMER -eq 1 ]]; then
+		echo "|      KERNEL_LAPICTIMER      |    [ADDED]    |"
+	else
+		echo "|      KERNEL_LAPICTIMER      |     [OK]      |"
+	fi	
+	if [[ $KERNEL_ACPINOIRQ -eq 1 ]]; then
+		echo "|      KERNEL_ACPINOIRQ       |    [ADDED]    |"
+	elif [[ $KERNEL_ACPINOIRQ -eq 2 ]]; then
+		echo "|      KERNEL_ACPINOIRQ       |   [REPLACED]  |"
+	else
+		echo "|      KERNEL_ACPINOIRQ       |     [OK]      |"
+	fi	
+	if [[ $KERNEL_ACPINOAPIC -eq 1 ]]; then
+		echo "|      KERNEL_ACPINOAPIC      |    [ADDED]    |"
+	else
+		echo "|      KERNEL_ACPINOAPIC      |     [OK]      |"
+	fi
+	if [[ $KERNEL_INTELIDLEMAXCSTATE -eq 1 ]]; then
+		echo "|  KERNEL_INTELIDLEMAXCSTATE  |    [ADDED]    |"
+	elif [[ $KERNEL_INTELIDLEMAXCSTATE -eq 2 ]]; then
+		echo "|  KERNEL_INTELIDLEMAXCSTATE  |   [REPLACED]  |"
 	else
 		echo "|  KERNEL_INTELIDLEMAXCSTATE  |     [OK]      |"
-	fi
-	if [[ KERNEL_PROCESSORMAXCSTATE -eq 0 ]]; then
-		echo "|  KERNEL_PROCESSORMAXCSTATE  |    [ERROR]    |"
-	else 
+	fi	
+	if [[ $KERNEL_PROCESSORMAXCSTATE -eq 1 ]]; then
+		echo "|  KERNEL_PROCESSORMAXCSTATE  |    [ADDED]    |"
+	elif [[ $KERNEL_PROCESSORMAXCSTATE -eq 2 ]]; then
+		echo "|  KERNEL_PROCESSORMAXCSTATE  |   [REPLACED]  |"
+	else
 		echo "|  KERNEL_PROCESSORMAXCSTATE  |     [OK]      |"
-	fi
-	if [[ KERNEL_IDLEPOOL -eq 0 ]]; then
-		echo "|        KERNEL_IDLEPOOL      |    [ERROR]    |"
-	else
-		echo "|        KERNEL_IDLEPOOL      |     [OK]      |"
-	fi
-	if [[ $KERNEL_LAPICTIMER -eq 0 ]]; then
-		echo "|       KERNEL_LAPICTIMER     |    [ERROR]    |"
-	else
-		echo "|       KERNEL_LAPICTIMER     |     [OK]      |"
-	fi
-	if [[ KERNEL_ACPINOAPIC -eq 0 ]]; then
-		echo "|       KERNEL_ACPINOAPIC     |    [ERROR]    |"
-	else
-		echo "|       KERNEL_ACPINOAPIC     |     [OK]      |"
+	fi	
 
-	fi
-	if [[ ISOLCPU -eq 0 ]]; then
-		echo "|           ISOLCPU           |    [ERROR]    |"
-	else
-		echo "|           ISOLCPU           |     [OK]      |"
-	fi
-	if [[ IRQ -eq 0 ]]; then
-		echo "|           IRQ               |    [ERROR]    |"
-	elif [[ IRQ -eq 1 ]]; then
-		echo "|           IRQ               |     [OK]      |"
-	else
-		echo "|           IRQ               |   [SKIPPED]   |"
-	fi
-	if [[ TSC_CLOCK -eq 0 ]]; then
+	# if [[ ISOLCPU -eq 0 ]]; then
+	# 	echo "|           ISOLCPU           |    [ERROR]    |"
+	# else
+	# 	echo "|           ISOLCPU           |     [OK]      |"
+	# fi
+	# if [[ IRQ -eq 0 ]]; then
+	# 	echo "|           IRQ               |    [ERROR]    |"
+	# elif [[ IRQ -eq 1 ]]; then
+	# 	echo "|           IRQ               |     [OK]      |"
+	# else
+	# 	echo "|           IRQ               |   [SKIPPED]   |"
+	# fi
+	if [[ TSC_CLOCK -eq -1 ]]; then
 		echo "|           TSC_CLOCK         |    [ERROR]    |"
+	elif [[ TSC_CLOCK -eq 1 ]]; then
+		echo "|           TSC_CLOCK         |  [MODIFIED]   |"
 	else
 		echo "|           TSC_CLOCK         |     [OK]      |"
 	fi
 	if [[ TSC_RELIABLE -eq 0 ]]; then
-		echo "|         TSC_RELIABLE        |    [ERROR]    |"
-	else
 		echo "|         TSC_RELIABLE        |     [OK]      |"
+	else
+		echo "|         TSC_RELIABLE        |    [ERROR]    |"
 	fi
 	echo "|*********************************************|"
 	echo "|Unfortunatly we are not able to spot if the  |"
